@@ -83,17 +83,33 @@ public:
     ///                       if it's null, all primvars in the varying buffer
     ///                       will be refined.
     ///
+    /// @param numStartEvents the number of events in the array pointed to by
+    ///                       startEvents.
+    ///
+    /// @param startEvents    points to an array of cl_event which will determine
+    ///                       when it is safe for the OpenCL device to begin work
+	///                       or NULL if it can begin immediately.
+    ///
+    /// @param finalEvent     pointer to a cl_event which will recieve a copy of
+    ///                       the cl_event which indicates when all work for this
+    ///                       call has completed.  This cl_event has an incremented
+    ///                       reference count and should be released via
+    ///                       clReleaseEvent().  NULL if not required.
+    ///
     template<class VERTEX_BUFFER, class VARYING_BUFFER>
     void Refine(ComputeContext const *context,
                 FarKernelBatchVector const &batches,
                 VERTEX_BUFFER *vertexBuffer,
                 VARYING_BUFFER *varyingBuffer,
                 OsdVertexBufferDescriptor const *vertexDesc=NULL,
-                OsdVertexBufferDescriptor const *varyingDesc=NULL) {
+                OsdVertexBufferDescriptor const *varyingDesc=NULL,
+                unsigned int numStartEvents=0,
+                const cl_event* startEvents=NULL,
+                cl_event* finalEvent=NULL) {
 
         if (batches.empty()) return;
 
-        bind(vertexBuffer, varyingBuffer, vertexDesc, varyingDesc);
+        bind(vertexBuffer, varyingBuffer, vertexDesc, varyingDesc, numStartEvents, startEvents, finalEvent, _useSyncEvents);
 
         FarDispatcher::Refine(this, context, batches, /*maxlevel*/-1);
 
@@ -109,11 +125,27 @@ public:
     ///
     /// @param  vertexBuffer  vertex-interpolated data buffer
     ///
+    /// @param numStartEvents the number of events in the array pointed to by
+    ///                       startEvents.
+    ///
+    /// @param startEvents    points to an array of cl_event which will determine
+    ///                       when it is safe for the OpenCL device to begin work
+	///                       or NULL if it can begin immediately.
+    ///
+    /// @param finalEvent     pointer to a cl_event which will recieve a copy of
+    ///                       the cl_event which indicates when all work for this
+    ///                       call has completed.  This cl_event has an incremented
+    ///                       reference count and should be released via
+    ///                       clReleaseEvent().  NULL if not required.
+    ///
     template<class VERTEX_BUFFER>
     void Refine(ComputeContext const *context,
                 FarKernelBatchVector const &batches,
-                VERTEX_BUFFER *vertexBuffer) {
-        Refine(context, batches, vertexBuffer, (VERTEX_BUFFER*)NULL);
+                VERTEX_BUFFER *vertexBuffer,
+                unsigned int numStartEvents=0,
+                const cl_event* startEvent=NULL,
+                cl_event* finalEvent=NULL) {
+        Refine(context, batches, vertexBuffer, (VERTEX_BUFFER*)NULL, NULL, NULL, numStartEvents, startEvent, finalEvent);
     }
 
     /// Waits until all running subdivision kernels finish.
@@ -177,7 +209,8 @@ protected:
     template<class VERTEX_BUFFER, class VARYING_BUFFER>
     void bind(VERTEX_BUFFER *vertex, VARYING_BUFFER *varying,
               OsdVertexBufferDescriptor const *vertexDesc,
-              OsdVertexBufferDescriptor const *varyingDesc) {
+              OsdVertexBufferDescriptor const *varyingDesc,
+              unsigned int numStartEvents, const cl_event* startEvents, cl_event* finalEvent, bool forceUseEvents) {
 
         // if the vertex buffer descriptor is specified, use it.
         // otherwise, assumes the data is tightly packed in the vertex buffer.
@@ -200,23 +233,63 @@ protected:
         _currentBindState.varyingBuffer = varying ? varying->BindCLBuffer(_clQueue) : 0;
         _currentBindState.kernelBundle = getKernelBundle(_currentBindState.vertexDesc,
                                                          _currentBindState.varyingDesc);
+
+        bool useEvents = forceUseEvents || numStartEvents > 0 || finalEvent != NULL;
+        if (useEvents) {
+            _currentBindState.numStartEvents = numStartEvents;
+            _currentBindState.startEvents = (numStartEvents > 0) ? startEvents : NULL;
+            _currentBindState.endEvent = &_currentBindState.outEvent;
+            _currentBindState.finalEvent = finalEvent;
+        }
+        // If not using events, then event pointers passed to CL functions (startEvents
+        // and endEvent) remain 0.
     }
 
     void unbind() {
+        if (_currentBindState.inEvent) {
+            _completionEvents.push_back(_currentBindState.inEvent);
+
+            if (_currentBindState.finalEvent) {
+                // Pass the last intermediate event in the chain back to the caller and
+                // increment the ref count since we keep a copy.
+                *_currentBindState.finalEvent = _currentBindState.inEvent;
+                clRetainEvent(_currentBindState.inEvent);
+            }
+        }
+
         _currentBindState.Reset();
     }
 
 private:
+	void postEnqueueKernel() const;
+
     struct BindState {
-        BindState() : vertexBuffer(NULL), varyingBuffer(NULL), kernelBundle(NULL) {}
+        BindState() : vertexBuffer(NULL), varyingBuffer(NULL), kernelBundle(NULL),
+						numStartEvents(0), startEvents(NULL), finalEvent(NULL), inEvent(NULL), outEvent(NULL), endEvent(NULL) {}
         void Reset() {
             vertexBuffer = varyingBuffer = NULL;
+            numStartEvents = 0;
+            startEvents = NULL;
+            finalEvent = NULL;
+            inEvent = NULL;
+            outEvent = NULL;
+            endEvent = NULL;
             vertexDesc.Reset();
             varyingDesc.Reset();
             kernelBundle = NULL;
         }
+
         cl_mem vertexBuffer;
         cl_mem varyingBuffer;
+		
+        unsigned int numStartEvents;
+        const cl_event* startEvents;
+        cl_event* finalEvent;
+
+        cl_event inEvent;
+        cl_event outEvent;
+        cl_event* endEvent;
+
         OsdVertexBufferDescriptor vertexDesc;
         OsdVertexBufferDescriptor varyingDesc;
         OsdCLKernelBundle *kernelBundle;
@@ -227,6 +300,9 @@ private:
     cl_context _clContext;
     cl_command_queue _clQueue;
     std::vector<OsdCLKernelBundle *> _kernelRegistry;
+
+    bool _useSyncEvents;
+    std::vector<cl_event> _completionEvents;
 };
 
 }  // end namespace OPENSUBDIV_VERSION
