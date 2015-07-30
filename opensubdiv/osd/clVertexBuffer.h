@@ -48,7 +48,7 @@ public:
 
     /// This method is meant to be used in client code in order to provide coarse
     /// vertices data to Osd.
-    void UpdateData(const float *src, int startVertex, int numVertices, cl_command_queue clQueue);
+    void UpdateData(const float *src, int startVertex, int numVertices, cl_command_queue clQueue, cl_event* startEvents = NULL, unsigned int numStartEvents = 0, cl_event* endEvent = NULL);
 
     /// Returns how many elements defined in this vertex buffer.
     int GetNumElements() const;

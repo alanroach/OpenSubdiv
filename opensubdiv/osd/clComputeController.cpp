@@ -50,7 +50,17 @@ namespace OPENSUBDIV_VERSION {
 
 OsdCLComputeController::OsdCLComputeController(cl_context clContext,
                                                cl_command_queue queue) :
-    _clContext(clContext), _clQueue(queue) {
+    _clContext(clContext), _clQueue(queue), _useSyncEvents(false) {
+
+    cl_command_queue_properties props = 0;
+    cl_int ciErrNum = clGetCommandQueueInfo(queue, CL_QUEUE_PROPERTIES, sizeof(props), &props, NULL);
+    CL_CHECK_ERROR(ciErrNum, "get command queue info %d\n", ciErrNum);
+
+    if (ciErrNum == CL_SUCCESS && (props & CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)) {
+        // Out-of-order command queues require explicit synchronization events to ensure safe
+        // serialization of dependant operations.
+        _useSyncEvents = true;
+    }
 }
 
 OsdCLComputeController::~OsdCLComputeController() {
@@ -59,12 +69,29 @@ OsdCLComputeController::~OsdCLComputeController() {
         it != _kernelRegistry.end(); ++it) {
         delete *it;
     }
+	
+	for (std::vector<cl_event>::iterator iter=_completionEvents.begin();
+		iter!= _completionEvents.end(); ++iter) {
+		clReleaseEvent(*iter);
+	}
 }
 
 void
 OsdCLComputeController::Synchronize() {
 
-    clFinish(_clQueue);
+    if (_completionEvents.empty()) {
+        cl_int ciErrNum = clFinish(_clQueue);
+        CL_CHECK_ERROR(ciErrNum, "synchronize %d\n", ciErrNum);
+
+    } else {
+        cl_int ciErrNum = clWaitForEvents((cl_uint)_completionEvents.size(), &_completionEvents[0]);
+        CL_CHECK_ERROR(ciErrNum, "synchronize %d\n", ciErrNum);
+        for (std::vector<cl_event>::iterator iter=_completionEvents.begin();
+            iter!= _completionEvents.end(); ++iter) {
+            clReleaseEvent(*iter);
+        }
+        _completionEvents.clear();
+    }
 }
 
 OsdCLKernelBundle *
@@ -117,10 +144,13 @@ OsdCLComputeController::ApplyBilinearEdgeVerticesKernel(
     clSetKernelArg(kernel, 6, sizeof(int), batch.GetTableOffsetPtr());
     clSetKernelArg(kernel, 7, sizeof(int), batch.GetStartPtr());
     clSetKernelArg(kernel, 8, sizeof(int), batch.GetEndPtr());
+
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "bilinear edge kernel %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -144,10 +174,13 @@ OsdCLComputeController::ApplyBilinearVertexVerticesKernel(
     clSetKernelArg(kernel, 6, sizeof(int), batch.GetTableOffsetPtr());
     clSetKernelArg(kernel, 7, sizeof(int), batch.GetStartPtr());
     clSetKernelArg(kernel, 8, sizeof(int), batch.GetEndPtr());
+
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "bilinear vertex kernel 1 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -176,8 +209,10 @@ OsdCLComputeController::ApplyCatmarkFaceVerticesKernel(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "face kernel %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -206,8 +241,10 @@ OsdCLComputeController::ApplyCatmarkEdgeVerticesKernel(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "edge kernel %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -238,8 +275,10 @@ OsdCLComputeController::ApplyCatmarkVertexVerticesKernelB(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "vertex kernel 1 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -270,8 +309,10 @@ OsdCLComputeController::ApplyCatmarkVertexVerticesKernelA1(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "vertex kernel 2 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -302,8 +343,10 @@ OsdCLComputeController::ApplyCatmarkVertexVerticesKernelA2(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "vertex kernel 2 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -332,8 +375,10 @@ OsdCLComputeController::ApplyLoopEdgeVerticesKernel(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "edge kernel %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -364,8 +409,10 @@ OsdCLComputeController::ApplyLoopVertexVerticesKernelB(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "vertex kernel 1 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -396,8 +443,10 @@ OsdCLComputeController::ApplyLoopVertexVerticesKernelA1(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "vertex kernel 2 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -428,8 +477,10 @@ OsdCLComputeController::ApplyLoopVertexVerticesKernelA2(
 
     ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                       kernel, 1, NULL, globalWorkSize,
-                                      NULL, 0, NULL, NULL);
+                                      NULL,
+                                      _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
     CL_CHECK_ERROR(ciErrNum, "vertex kernel 2 %d\n", ciErrNum);
+    postEnqueueKernel();
 }
 
 void
@@ -468,12 +519,42 @@ OsdCLComputeController::ApplyVertexEdits(
 
         ciErrNum = clEnqueueNDRangeKernel(_clQueue,
                                           kernel, 1, NULL, globalWorkSize,
-                                          NULL, 0, NULL, NULL);
-        
+										  NULL,
+                                          _currentBindState.numStartEvents, _currentBindState.startEvents, _currentBindState.endEvent);
         CL_CHECK_ERROR(ciErrNum, "vertex edit %d %d\n", batch.GetTableIndex(), ciErrNum);
+        postEnqueueKernel();
 
     } else if (edit->GetOperation() == FarVertexEdit::Set) {
         // XXXX TODO
+    }
+}
+
+void
+OsdCLComputeController::postEnqueueKernel() const
+{
+    if (!_useSyncEvents && !_currentBindState.endEvent) {
+        return;
+    }
+	
+    BindState *nonConstBindState = const_cast<BindState*>(&_currentBindState);
+
+    // Release previous intermediate input event and move intermediate output to input so as
+    // to ensure safe serialization of multiple kernels on a batch vector.
+    if (nonConstBindState->inEvent) {
+        cl_int ciErrNum = clReleaseEvent(nonConstBindState->inEvent);
+        CL_CHECK_ERROR(ciErrNum, "release event %d\n", ciErrNum);
+    }
+
+    nonConstBindState->inEvent = nonConstBindState->outEvent;
+    nonConstBindState->outEvent = NULL;
+
+    // First time, use initial (external) startEvents.  On subsequent kernels, use intermediate event as startEvent.
+    if (nonConstBindState->inEvent) {
+        nonConstBindState->startEvents = &nonConstBindState->inEvent;
+        nonConstBindState->numStartEvents = 1;
+    } else {
+        nonConstBindState->startEvents = NULL;
+        nonConstBindState->numStartEvents = 0;
     }
 }
 
